@@ -1,0 +1,30 @@
+# Core framework
+streamlit>=1.37,<2
+
+# NLP — flexible range supports Python 3.10–3.14 (old 3.7.5 pins break on
+# 3.12+ via blis/Cython build failures; prefer wheels, not source builds).
+spacy>=3.7,<4
+
+# ML / numerics (sparse TF-IDF + cosine similarity)
+# NOTE: numpy MUST be >=2.0 — modern pyarrow (>=15, required by streamlit)
+# refuses to import with numpy 1.x ("pyarrow requires NumPy 2.0 or newer").
+scikit-learn>=1.3,<2
+scipy>=1.11,<2
+numpy>=2.0,<3
+
+# Document parsing (in-memory, no disk I/O)
+# pdfplumber = primary engine (better layout); PyPDF2 = fallback.
+pdfplumber>=0.10
+PyPDF2>=3.0.1
+python-docx>=1.1.2
+
+# Dashboard tables & charts
+pandas>=2.0,<3
+matplotlib>=3.8
+
+# Testing
+pytest>=7.0
+
+# NOTE: install the spaCy model separately (do NOT pin the .whl URL —
+# model minor version must match your installed spacy major):
+#   python -m spacy download en_core_web_sm
