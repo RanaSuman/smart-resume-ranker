@@ -1,5 +1,8 @@
 # Core framework
-streamlit>=1.37,<2
+# NOTE: >=1.45 is required by the UI in app.py — st.context.theme.type (OS
+# colour scheme for Auto mode), st.segmented_control (theme picker) and the
+# width="stretch" widget parameter all post-date 1.37.
+streamlit>=1.45,<2
 
 # NLP — flexible range supports Python 3.10–3.14 (old 3.7.5 pins break on
 # 3.12+ via blis/Cython build failures; prefer wheels, not source builds).

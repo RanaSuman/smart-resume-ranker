@@ -173,11 +173,20 @@ def rank_resumes(
         except Exception:
             raw = 0.0
         try:
-            resume_tokens = set(safe_resumes[i].split())
-            gaps = [t for t in jd_top_terms if t not in resume_tokens][:top_gap_terms]
+            resume_text = safe_resumes[i]
+            # Build a token set that covers both unigrams AND bigrams so that
+            # gap terms from the TF-IDF vocabulary (which may be bigrams like
+            # "machine learning") are correctly found in the resume text.
+            resume_unigrams = set(resume_text.split())
+            resume_words = resume_text.split()
+            resume_bigrams = {
+                f"{resume_words[j]} {resume_words[j + 1]}"
+                for j in range(len(resume_words) - 1)
+            }
+            resume_ngrams = resume_unigrams | resume_bigrams
+            gaps = [t for t in jd_top_terms if t not in resume_ngrams][:top_gap_terms]
         except Exception:
             gaps = []
-        # Also catch bigram components missing? Keep simple + fast.
         candidates.append(
             RankedCandidate(
                 name=name, score=round(raw * 100.0, 2), raw_cosine=raw, skill_gaps=gaps

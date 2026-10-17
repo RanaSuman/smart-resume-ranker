@@ -1,18 +1,36 @@
 """Input component for Smart Resume Ranker."""
 from __future__ import annotations
 
+import logging
+
 import streamlit as st
 
 from config import MAX_RESUMES
-from utils.parser import sanitize_filename, extract_text
+from utils.parser import (
+    ALLOWED_EXTENSIONS,
+    EncryptedDocumentError,
+    FileValidationError,
+    ScannedDocumentError,
+    TextExtractionError,
+    extract_text,
+    sanitize_filename,
+)
+
+logger = logging.getLogger(__name__)
 
 
-def render_inputs() -> tuple[str, list]:
+def render_inputs() -> tuple[str | None, list]:
     """Render the upload input sections for JD and resumes.
 
     Returns:
-        (jd_text, resume_files) where jd_text is the job description text
-        and resume_files is the list of uploaded resume file objects.
+        (jd_text, resume_files) where jd_text is the extracted job description
+        text (or None if no input provided yet) and resume_files is the list
+        of uploaded resume file objects.
+
+    Note:
+        This function renders the upload widgets and extracts the JD text, but
+        does NOT call st.stop() — validation and stopping is the caller's
+        responsibility so that this component can be used purely for rendering.
     """
     st.markdown('<div class="section-label">Step 01 — Inputs</div>', unsafe_allow_html=True)
     st.markdown(
@@ -44,7 +62,8 @@ def render_inputs() -> tuple[str, list]:
     with col_res:
         with st.container(border=True):
             st.markdown(
-                f"**2️⃣ &nbsp; Candidate resumes** <span style='color:#64748B'>(up to {MAX_RESUMES})</span>"
+                f"**2️⃣ &nbsp; Candidate resumes** <span style='color:#64748B'>(up to {MAX_RESUMES})</span>",
+                unsafe_allow_html=True,
             )
             st.caption("PDF or DOCX · each file processed in memory, in isolation.")
             resume_files = st.file_uploader(
@@ -61,43 +80,5 @@ def render_inputs() -> tuple[str, list]:
             else:
                 st.info("No resumes yet — upload at least one to enable ranking.")
 
-    jd_text = ""
-    if jd_file is not None:
-        try:
-            raw = jd_file.getvalue()
-            fname = sanitize_filename(jd_file.name)
-            if fname.lower().endswith(".txt"):
-                try:
-                    jd_text = raw.decode("utf-8", errors="ignore")
-                except Exception as exc:
-                    st.error(f"Could not decode JD text file: {exc}")
-                    st.stop()
-                if len(jd_text.strip()) < 10:
-                    st.error("JD text file appears empty or image-only.")
-                    st.stop()
-            else:
-                try:
-                    from utils.parser import (
-                        ScannedDocumentError,
-                        EncryptedDocumentError,
-                        FileValidationError,
-                        TextExtractionError,
-                    )
-
-                    jd_text = extract_text(raw, fname)
-                except Exception as exc:
-                    st.error(f"Could not read Job Description: {exc}")
-                    st.stop()
-        except Exception as exc:
-            st.error(f"Could not read Job Description: {exc}")
-            st.stop()
-    if not jd_text.strip() and jd_pasted.strip():
-        jd_text = jd_pasted.strip()
-    if not jd_text.strip():
-        st.error("Please upload or paste a Job Description before ranking.")
-        st.stop()
-    if len(jd_text.strip()) < 10:
-        st.error("Job Description is too short — please provide more detail.")
-        st.stop()
-
-    return jd_text, resume_files
+    # Return raw file objects; JD extraction is done in app.py on button click.
+    return jd_file, jd_pasted, resume_files

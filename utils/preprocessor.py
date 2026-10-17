@@ -13,7 +13,6 @@ fallback text) instead of crashing the batch.
 
 from __future__ import annotations
 
-import functools
 import logging
 import re
 from typing import List
@@ -74,9 +73,8 @@ def normalize_whitespace(text: str) -> str:
         return ""
 
 
-@functools.lru_cache(maxsize=1)
 def get_nlp() -> object:
-    """Load spaCy model once (cached). Parser/NER disabled for speed.
+    """Load spaCy model once (cached via st.cache_resource in app). Parser/NER disabled for speed.
 
     Raises:
         RuntimeError: If ``en_core_web_sm`` is missing, with install hint,

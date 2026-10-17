@@ -159,7 +159,7 @@ def validate_file_signature(data: bytes, ext: str, filename: str = "") -> str:
             )
         return "application/pdf"
     if ext == ".docx":
-        if not data[:4] == _DOCX_MAGIC:
+        if not data.startswith(_DOCX_MAGIC):
             raise FileValidationError(
                 f"File '{filename}' claims to be DOCX but lacks the "
                 f"ZIP (PK..) signature — rejected (possible spoofed type)."

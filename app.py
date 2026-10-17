@@ -6,12 +6,14 @@ Workflow:
   3. Sparse TF-IDF + cosine similarity ranking.
   4. Interactive rankings, distribution chart, skill gaps, CSV export.
 
-Security: filenames sanitized, extension whitelist + magic-byte signature
-check, 10 MB/file cap, PII redaction toggle, zero persistent storage.
-Robustness: corrupt / encrypted / scanned files are isolated per-file
-(``st.error`` / ``st.warning``) and never crash the batch; zero-overlap
-yields 0.0 scores with an explanatory warning; empty inputs are rejected
-up front with clear guidance.
+Theming
+-------
+Streamlit 1.66 does **not** expose a ``data-theme`` attribute in the DOM and has
+retired the old BaseWeb test-ids, so the previous attribute-based CSS was dead.
+Instead this app resolves the active theme in Python and injects the whole
+colour palette as CSS custom properties (``:root { … }``) on every run, while
+Streamlit's native ``theme.base`` is switched in lock-step. Everything then
+recolours correctly from a single source of truth.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import time
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -40,7 +42,6 @@ from utils.preprocessor import get_nlp, preprocess_corpus
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------- page setup
 st.set_page_config(
     page_title="Smart Resume Ranker",
     page_icon="📄",
@@ -50,166 +51,531 @@ st.set_page_config(
 
 MAX_RESUMES = 50
 
-# ------------------------------------------------------- premium stylesheet
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+# ═══════════════════════════════════════════════════════════════════════════════
+#  THEME PALETTES
+#  Each palette is a flat dict of CSS custom properties. The resolved palette is
+#  serialised into a `:root { … }` block and injected on every run, so switching
+#  the theme recolours the *entire* UI with zero reliance on DOM attributes.
+# ═══════════════════════════════════════════════════════════════════════════════
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.block-container { max-width: 1180px; padding-top: 2rem; padding-bottom: 3rem; }
-
-/* ---- Slim transparent header: keeps the sidebar collapse/expand toggle
-        working, while all other chrome (menu / deploy) is removed below.
-        NOTE: the sidebar EXPAND button lives *inside* the toolbar, so the
-        toolbar itself must never be display:none. ---- */
-[data-testid="stHeader"],
-header[data-testid="stHeader"],
-header.stAppHeader { background: transparent !important; }
-
-/* ---- Sidebar open/close controls must ALWAYS stay visible & clickable.
-        Streamlit renders different testids depending on state:
-          * open   -> stSidebarCollapseButton (in stSidebarHeader)
-          * closed -> stExpandSidebarButton   (inside stToolbar) ---- */
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stExpandSidebarButton"] {
-  display: inline-flex !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  pointer-events: auto !important;
+PALETTES: Dict[str, Dict[str, str]] = {
+    "light": {
+        # surfaces
+        "--bg":          "#F6F6FB",
+        "--bg-soft":     "#EFEFF6",
+        "--surface":     "#FFFFFF",
+        "--surface-2":   "#F6F6FB",
+        "--border":      "rgba(17,17,34,.09)",
+        "--border-2":    "rgba(17,17,34,.16)",
+        # text
+        "--tx":          "#0B0B12",
+        "--tx-2":        "#37374A",
+        "--tx-3":        "#6A6A7B",
+        "--tx-4":        "#9C9CAC",
+        # brand
+        "--brand":       "#7C3AED",
+        "--brand-2":     "#0EA5E9",
+        "--brand-ink":   "#6D28D9",
+        "--brand-glow":  "rgba(124,58,237,.28)",
+        "--grad-brand":  "linear-gradient(135deg,#7C3AED,#2563EB)",
+        "--grad-kpi":    "linear-gradient(135deg,#7C3AED,#2563EB)",
+        # elevation
+        "--shadow-sm":   "0 1px 2px rgba(18,12,42,.06)",
+        "--shadow":      "0 6px 22px rgba(18,12,42,.07), 0 1px 3px rgba(18,12,42,.05)",
+        "--shadow-lg":   "0 18px 48px rgba(18,12,42,.11), 0 6px 16px rgba(18,12,42,.06)",
+        # dropzone
+        "--drop-bg":     "#F5F3FF",
+        "--drop-bd":     "#DDD6FE",
+        "--drop-bd-hv":  "#A78BFA",
+        "--drop-bg-hv":  "#EDE9FE",
+        # sidebar
+        "--sidebar-bg":  "linear-gradient(180deg,#FFFFFF 0%,#F4F4FB 100%)",
+        "--sidebar-bd":  "rgba(17,17,34,.08)",
+        "--sb-card":     "#FFFFFF",
+        "--sb-card-bd":  "rgba(17,17,34,.08)",
+        # tags
+        "--tag-bg":      "rgba(124,58,237,.09)",
+        "--tag-fg":      "#5B21B6",
+        "--tag-bd":      "rgba(124,58,237,.22)",
+        # badges
+        "--b-green-bg":  "#DCFCE7", "--b-green-fg":  "#15803D", "--b-green-bd":  "#BBF7D0",
+        "--b-violet-bg": "#EDE9FE", "--b-violet-fg": "#5B21B6", "--b-violet-bd": "#C4B5FD",
+        "--b-amber-bg":  "#FEF3C7", "--b-amber-fg":  "#92400E", "--b-amber-bd":  "#FDE68A",
+        "--b-rose-bg":   "#FFF1F2", "--b-rose-fg":   "#BE123C", "--b-rose-bd":   "#FECDD3",
+    },
+    "dark": {
+        "--bg":          "#0A0A11",
+        "--bg-soft":     "#101019",
+        "--surface":     "rgba(255,255,255,.045)",
+        "--surface-2":   "rgba(255,255,255,.07)",
+        "--border":      "rgba(255,255,255,.09)",
+        "--border-2":    "rgba(255,255,255,.17)",
+        "--tx":          "#F4F4F8",
+        "--tx-2":        "#D2D2DC",
+        "--tx-3":        "#A0A0AE",
+        "--tx-4":        "#6E6E7C",
+        "--brand":       "#A78BFA",
+        "--brand-2":     "#38BDF8",
+        "--brand-ink":   "#C4B5FD",
+        "--brand-glow":  "rgba(124,58,237,.50)",
+        "--grad-brand":  "linear-gradient(135deg,#7C3AED,#2563EB)",
+        "--grad-kpi":    "linear-gradient(135deg,#A78BFA,#38BDF8)",
+        "--shadow-sm":   "0 1px 2px rgba(0,0,0,.45)",
+        "--shadow":      "0 8px 26px rgba(0,0,0,.45)",
+        "--shadow-lg":   "0 22px 60px rgba(0,0,0,.55)",
+        "--drop-bg":     "rgba(124,58,237,.13)",
+        "--drop-bd":     "rgba(124,58,237,.42)",
+        "--drop-bd-hv":  "#7C3AED",
+        "--drop-bg-hv":  "rgba(124,58,237,.22)",
+        "--sidebar-bg":  "linear-gradient(180deg,#0D0A1A 0%,#07060F 100%)",
+        "--sidebar-bd":  "rgba(255,255,255,.07)",
+        "--sb-card":     "rgba(255,255,255,.035)",
+        "--sb-card-bd":  "rgba(255,255,255,.09)",
+        "--tag-bg":      "rgba(124,58,237,.16)",
+        "--tag-fg":      "#C4B5FD",
+        "--tag-bd":      "rgba(124,58,237,.36)",
+        "--b-green-bg":  "#052E16", "--b-green-fg":  "#86EFAC", "--b-green-bd":  "#166534",
+        "--b-violet-bg": "#2E1065", "--b-violet-fg": "#C4B5FD", "--b-violet-bd": "#4C1D95",
+        "--b-amber-bg":  "#431407", "--b-amber-fg":  "#FCD34D", "--b-amber-bd":  "#92400E",
+        "--b-rose-bg":   "#4C0519", "--b-rose-fg":   "#FDA4AF", "--b-rose-bd":   "#9F1239",
+    },
 }
 
-/* Make the re-open button pop even over a transparent header. */
-[data-testid="stExpandSidebarButton"] {
-  background: linear-gradient(135deg, #1D4ED8, #06B6D4) !important;
-  color: #FFFFFF !important;
-  border-radius: 10px !important;
-  margin: .5rem !important;
-  padding: .15rem .3rem !important;
-  box-shadow: 0 6px 16px rgba(29,78,216,.35) !important;
-}
-[data-testid="stExpandSidebarButton"] svg { color: #FFFFFF !important; }
-
-/* Hero banner */
-.hero {
-  background:
-    radial-gradient(1200px 300px at 85% -10%, rgba(6,182,212,.35), transparent 60%),
-    linear-gradient(135deg, #0B1B33 0%, #1D4ED8 58%, #06B6D4 100%);
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 20px; padding: 2.2rem 2.4rem; color: #fff;
-  box-shadow: 0 20px 45px rgba(29,78,216,.30); margin-bottom: 1.5rem;
-}
-.hero h1 { color: #fff !important; font-size: 2rem; font-weight: 800; margin: 0; letter-spacing: -.02em; }
-.hero p { color: rgba(255,255,255,.85); margin: .5rem 0 1rem; font-size: 1rem; }
-.hero .pills { display: flex; gap: .5rem; flex-wrap: wrap; }
-.hero .pill {
-  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25);
-  color: #fff; font-size: .78rem; font-weight: 600; padding: .3rem .75rem; border-radius: 999px;
+# Native Streamlit theme colours, applied through the (private) config API so
+# every built-in widget / chart / table follows the active mode.
+NATIVE_THEME: Dict[str, Dict[str, str]] = {
+    "light": {
+        "theme.base":                    "light",
+        "theme.primaryColor":            "#7C3AED",
+        "theme.backgroundColor":         "#F6F6FB",
+        "theme.secondaryBackgroundColor": "#FFFFFF",
+        "theme.textColor":               "#0B0B12",
+    },
+    "dark": {
+        "theme.base":                    "dark",
+        "theme.primaryColor":            "#A78BFA",
+        "theme.backgroundColor":         "#0A0A11",
+        "theme.secondaryBackgroundColor": "#14141F",
+        "theme.textColor":               "#F4F4F8",
+    },
 }
 
-/* Section titles */
-.section-label {
-  font-size: .75rem; font-weight: 700; letter-spacing: .12em;
-  color: #0284C7; text-transform: uppercase; margin: 1.6rem 0 .4rem;
-}
-.section-title { font-size: 1.25rem; font-weight: 700; color: #0F172A; margin: 0 0 .2rem; }
-.section-sub { color: #64748B; font-size: .9rem; margin-bottom: 1rem; }
+_THEME_LABELS = {"Light": "☀️  Light", "Auto": "💻  Auto", "Dark": "🌙  Dark"}
 
-/* Cards (applied to bordered containers) */
-[data-testid="stVerticalBlockBorderWrapper"] {
-  border-radius: 16px !important;
-  box-shadow: 0 8px 24px rgba(15,23,42,.06);
-}
 
-/* KPI cards */
-.kpi { text-align: center; padding: .4rem .2rem; }
-.kpi .kpi-label { font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #64748B; }
-.kpi .kpi-value { font-size: 1.7rem; font-weight: 800; color: #0F172A; line-height: 1.2; }
-.kpi .kpi-sub { font-size: .78rem; color: #64748B; }
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STYLESHEET TEMPLATE  ( `/*__TOKENS__*/` is replaced with the active palette )
+# ═══════════════════════════════════════════════════════════════════════════════
+_CSS_TEMPLATE = """
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
 
-/* Top-candidate spotlight */
-.spotlight {
-  background:
-    radial-gradient(600px 160px at 90% 0%, rgba(6,182,212,.4), transparent 60%),
-    linear-gradient(135deg, #0B1B33, #1D4ED8);
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 16px; padding: 1.2rem 1.5rem; color: #fff;
-  box-shadow: 0 12px 30px rgba(29,78,216,.35); margin: 1rem 0;
-}
-.spotlight .spot-label { font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: rgba(255,255,255,.75); }
-.spotlight .spot-name { font-size: 1.3rem; font-weight: 800; margin: .15rem 0; }
-.spotlight .spot-sub { font-size: .85rem; color: rgba(255,255,255,.85); }
-
-/* Score badges */
-.badge { display: inline-block; font-weight: 700; font-size: .8rem; padding: .2rem .65rem; border-radius: 999px; }
-.badge-green { background: #DCFCE7; color: #166534; }
-.badge-indigo { background: #E0E7FF; color: #3730A3; }
-.badge-amber { background: #FEF3C7; color: #92400E; }
-.badge-red { background: #FEE2E2; color: #991B1B; }
-
-/* Skill tags */
-.skill-tag {
-  display: inline-block; background: #E0F2FE; color: #0C4A6E; border: 1px solid #7DD3FC;
-  font-size: .76rem; font-weight: 600; padding: .18rem .6rem; border-radius: 999px; margin: .12rem;
+/* ── TOKENS (injected per-run) ─────────────────────────────────────────── */
+:root {
+/*__TOKENS__*/
+  --font:      'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --radius-sm: 10px;
+  --radius:    14px;
+  --radius-lg: 20px;
+  --radius-xl: 26px;
+  --grad-hero: linear-gradient(135deg,#1E0A3C 0%,#3B0764 42%,#0C4A6E 100%);
+  --grad-spot: linear-gradient(135deg,#1E0A3C 0%,#4C1D95 52%,#0C4A6E 100%);
 }
 
-/* CTA button */
-div.stButton > button[kind="primary"] {
-  background: linear-gradient(135deg, #1D4ED8, #06B6D4);
-  border: none; border-radius: 12px; padding: .75rem 1rem;
-  font-weight: 700; font-size: 1rem; box-shadow: 0 10px 25px rgba(29,78,216,.35);
+/* ── BASE ──────────────────────────────────────────────────────────────── */
+html, body, [class*="css"] {
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
-div.stButton > button[kind="primary"]:hover { filter: brightness(1.07); }
-div.stDownloadButton > button {
-  border-radius: 12px; font-weight: 700; border: 1.5px solid #1D4ED8; color: #1D4ED8;
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+  background: var(--bg) !important;
 }
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stMainBlockContainer"] {
+  max-width: 1320px;
+  padding: 0 2rem 5rem;
+}
+[data-testid="stVerticalBlock"] { gap: .9rem; }
+a { color: var(--brand-ink); }
 
-/* Uploaders: equal, tidy */
-[data-testid="stFileUploader"] { border-radius: 12px; }
-[data-testid="stFileUploaderDropzone"] { min-height: 120px; }
-
-/* ---- Remove Streamlit chrome: main menu, deploy button, footer.
-        IMPORTANT: hide only the menu/actions — NOT the whole toolbar, because
-        that would also hide the stExpandSidebarButton used to re-open the
-        collapsed sidebar. ---- */
-[data-testid="stMainMenu"],
-[data-testid="stMainMenuButton"],
-[data-testid="stToolbarActions"],
-[data-testid="stAppDeployButton"],
+/* ── CHROME CLEANUP ────────────────────────────────────────────────────── */
+[data-testid="stMainMenu"], [data-testid="stMainMenuButton"],
+[data-testid="stToolbarActions"], [data-testid="stAppDeployButton"],
 div[class*="stAppDeployButton"] { display: none !important; }
 #MainMenu { visibility: hidden !important; }
 footer { visibility: hidden !important; }
-[data-testid="stDecoration"],
-[data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stDecoration"], [data-testid="stStatusWidget"] { display: none !important; }
 
-/* Hidden 1px helper iframe (OS-theme detector) — keep it out of layout */
-[data-testid="stIFrame"],
-iframe[title="st.iframe"] {
-  position: absolute !important;
-  width: 1px !important; height: 1px !important;
-  border: 0 !important; opacity: 0 !important; pointer-events: none !important;
+/* Sidebar expand button */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stExpandSidebarButton"] {
+  visibility: visible !important; opacity: 1 !important; pointer-events: auto !important;
+}
+[data-testid="stExpandSidebarButton"] {
+  background: var(--grad-brand) !important; color: #fff !important;
+  border-radius: 10px !important; margin: .5rem !important; padding: .22rem .4rem !important;
+  box-shadow: 0 4px 14px var(--brand-glow) !important;
+}
+[data-testid="stExpandSidebarButton"] svg { color: #fff !important; }
+
+/* ── SIDEBAR ───────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+  background: var(--sidebar-bg) !important;
+  border-right: 1px solid var(--sidebar-bd) !important;
+}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] .stMarkdown { color: var(--tx-2); }
+[data-testid="stSidebar"] label { color: var(--tx-3) !important; font-size: .81rem !important; font-weight: 600 !important; }
+[data-testid="stSidebar"] hr { border-color: var(--sidebar-bd) !important; margin: .7rem 0 !important; }
+
+/* side cards (containers carrying a `side_` key) */
+[data-testid="stVerticalBlock"][class*="st-key-side_"] {
+  background: var(--sb-card) !important;
+  border: 1px solid var(--sb-card-bd) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: none !important;
+  padding: 1rem 1.05rem !important;
 }
 
-/* Center helpers */
-.center { text-align: center; }
-.footer { text-align: center; color: #94A3B8; font-size: .78rem; padding: 1.5rem 0 .5rem; }
-</style>
-    """,
-    unsafe_allow_html=True,
-)
+/* Sidebar brand */
+.sb-logo { display: flex; align-items: center; gap: .75rem; padding: .15rem 0 .55rem; }
+.sb-logo-mark {
+  width: 42px; height: 42px; border-radius: 13px; flex-shrink: 0;
+  background: var(--grad-brand);
+  display: flex; align-items: center; justify-content: center; font-size: 1.2rem;
+  box-shadow: 0 8px 20px var(--brand-glow);
+}
+.sb-logo-text-main { font-size: .98rem; font-weight: 800; color: var(--tx) !important; letter-spacing: -.02em; line-height: 1.15; }
+.sb-logo-text-sub  { font-size: .68rem; color: var(--tx-4) !important; letter-spacing: .09em; text-transform: uppercase; font-weight: 600; }
+
+.sb-cap {
+  font-size: .62rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase;
+  color: var(--brand-ink) !important;
+  margin: .15rem 0 .55rem; display: flex; align-items: center; gap: .45rem;
+}
+.sb-cap::before { content: ''; width: 15px; height: 2px; border-radius: 2px; background: var(--grad-brand); }
+
+.sb-info { font-size: .77rem; line-height: 2.05; color: var(--tx-3); }
+.sb-info b { color: var(--tx-2); font-weight: 700; }
+
+/* Developer card */
+.dev-card {
+  padding: 1rem 1.1rem; border-radius: 18px;
+  background: rgba(124,58,237,.12);
+  border: 1px solid rgba(124,58,237,.26);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--brand) 15%, transparent), color-mix(in srgb, var(--brand-2) 10%, transparent));
+  border: 1px solid color-mix(in srgb, var(--brand) 28%, transparent);
+}
+.dev-av {
+  width: 42px; height: 42px; border-radius: 50%; background: var(--grad-brand);
+  display: flex; align-items: center; justify-content: center; font-size: 1.2rem; margin-bottom: .55rem;
+  box-shadow: 0 6px 16px var(--brand-glow);
+}
+.dev-name { font-size: .9rem; font-weight: 800; color: var(--tx) !important; letter-spacing: -.01em; }
+.dev-role { font-size: .71rem; color: var(--tx-3) !important; margin: .06rem 0 .65rem; }
+.dev-btn {
+  display: inline-flex; align-items: center; gap: .35rem;
+  background: var(--grad-brand); color: #fff !important; text-decoration: none !important;
+  font-size: .75rem; font-weight: 700; padding: .4rem .95rem; border-radius: 10px;
+  box-shadow: 0 4px 14px var(--brand-glow); transition: filter .15s, box-shadow .15s;
+}
+.dev-btn:hover { filter: brightness(1.09); box-shadow: 0 7px 22px var(--brand-glow); }
+.dev-btn svg { width: 11px; height: 11px; }
+
+/* ── HERO ──────────────────────────────────────────────────────────────── */
+.hero {
+  position: relative; overflow: hidden;
+  background: var(--grad-hero); border: 1px solid rgba(255,255,255,.10);
+  border-radius: var(--radius-xl); padding: 2.6rem 3rem;
+  margin: .3rem 0 2rem;
+  box-shadow: 0 30px 74px rgba(28,3,80,.50);
+  display: block;
+}
+@media (max-width: 980px) { .hero { padding: 2.2rem 1.6rem; } }
+.hero::before {
+  content: ''; position: absolute; top: -130px; right: -70px; width: 500px; height: 500px;
+  border-radius: 50%; background: radial-gradient(circle, rgba(14,165,233,.24) 0%, transparent 68%);
+  pointer-events: none;
+}
+.hero::after {
+  content: ''; position: absolute; bottom: -150px; left: 26%; width: 430px; height: 430px;
+  border-radius: 50%; background: radial-gradient(circle, rgba(124,58,237,.20) 0%, transparent 68%);
+  pointer-events: none;
+}
+.hero-inner { position: relative; z-index: 1; }
+.hero-badge {
+  display: inline-flex; align-items: center; gap: .45rem;
+  background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+  color: rgba(255,255,255,.9); font-size: .7rem; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: .3rem .9rem; border-radius: 999px; margin-bottom: 1.05rem;
+}
+.hero-badge .pulse {
+  width: 7px; height: 7px; border-radius: 50%; background: #38BDF8;
+  box-shadow: 0 0 8px #38BDF8; animation: hpulse 2.2s ease-in-out infinite;
+}
+@keyframes hpulse { 0%,100%{ opacity:1; transform:scale(1); } 50%{ opacity:.45; transform:scale(.72); } }
+.hero h1 { color: #fff !important; font-size: 2.45rem; font-weight: 800; margin: 0 0 .75rem; letter-spacing: -.033em; line-height: 1.13; }
+.hero h1 em { font-style: normal; color: #7DD3FC; }
+.hero p { color: rgba(255,255,255,.74); font-size: .97rem; line-height: 1.72; margin: 0 0 1.5rem; max-width: 640px; }
+.hero-chips { display: flex; gap: .5rem; flex-wrap: wrap; }
+.hero-chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.17);
+  color: rgba(255,255,255,.86); font-size: .73rem; font-weight: 600;
+  padding: .3rem .85rem; border-radius: 999px;
+}
+
+/* ── SECTION LABELS ────────────────────────────────────────────────────── */
+.sec-cap {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-size: .65rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--brand-ink); margin: 1.6rem 0 .35rem;
+}
+.sec-cap::before { content: ''; width: 20px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--brand), var(--brand-2)); }
+.sec-title { font-size: 1.45rem; font-weight: 800; color: var(--tx); margin: 0 0 .3rem; letter-spacing: -.027em; }
+.sec-sub { color: var(--tx-3); font-size: .89rem; line-height: 1.65; margin-bottom: 1.25rem; }
+
+/* ── MAIN CARDS ────────────────────────────────────────────────────────── */
+[data-testid="stVerticalBlock"][class*="st-key-card_"],
+[data-testid="stVerticalBlock"][class*="st-key-kpi_"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow) !important;
+  padding: 1.2rem 1.25rem !important;
+  transition: box-shadow .25s, border-color .25s, transform .25s !important;
+}
+[data-testid="stVerticalBlock"][class*="st-key-card_"]:hover,
+[data-testid="stVerticalBlock"][class*="st-key-kpi_"]:hover {
+  box-shadow: var(--shadow-lg) !important;
+  border-color: var(--brand-glow) !important;
+  border-color: color-mix(in srgb, var(--brand) 32%, transparent) !important;
+  transform: translateY(-2px);
+}
+
+.uc-head { display: flex; align-items: center; gap: .6rem; font-size: .95rem; font-weight: 700; color: var(--tx); margin-bottom: .3rem; }
+.uc-icon { width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: .92rem; flex-shrink: 0; }
+.uc-violet { background: linear-gradient(135deg,#7C3AED,#A78BFA); box-shadow: 0 4px 12px rgba(124,58,237,.35); }
+.uc-sky    { background: linear-gradient(135deg,#0369A1,#0EA5E9); box-shadow: 0 4px 12px rgba(14,165,233,.35); }
+.uc-hint   { font-size: .72rem; color: var(--tx-3); font-weight: 600; }
+
+/* ── FILE DROP ZONES ───────────────────────────────────────────────────── */
+[data-testid="stFileUploaderDropzone"] {
+  min-height: 130px;
+  border: 1.5px dashed var(--drop-bd) !important;
+  border-radius: var(--radius) !important;
+  background: var(--drop-bg) !important;
+  transition: border-color .2s, background .2s;
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+  border-color: var(--drop-bd-hv) !important;
+  background: var(--drop-bg-hv) !important;
+}
+[data-testid="stFileUploaderDropzone"] svg { color: var(--brand) !important; }
+
+/* ── KPI ───────────────────────────────────────────────────────────────── */
+.kpi { text-align: center; padding: .35rem .3rem; }
+.kpi-ico { font-size: 1.45rem; margin-bottom: .35rem; line-height: 1; }
+.kpi-lbl { font-size: .63rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; color: var(--tx-3); }
+.kpi-val {
+  font-size: 2rem; font-weight: 800; line-height: 1.1; margin: .22rem 0 .14rem;
+  background: var(--grad-kpi); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.kpi-sub { font-size: .74rem; color: var(--tx-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── SPOTLIGHT ─────────────────────────────────────────────────────────── */
+.spotlight {
+  position: relative; overflow: hidden; background: var(--grad-spot);
+  border: 1px solid rgba(255,255,255,.10); border-radius: 22px; padding: 1.6rem 2rem; color: #fff;
+  box-shadow: 0 20px 52px rgba(28,3,80,.42); margin: 1.35rem 0 1.15rem;
+  display: flex; align-items: center; justify-content: space-between; gap: 1.2rem; flex-wrap: wrap;
+}
+.spotlight::before {
+  content: ''; position: absolute; top: -70px; right: -50px; width: 320px; height: 320px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(14,165,233,.24) 0%, transparent 65%); pointer-events: none;
+}
+.sp-left { position: relative; z-index: 1; }
+.sp-right { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; }
+.sp-eyebrow { display: flex; align-items: center; gap: .4rem; font-size: .63rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; color: rgba(255,255,255,.58); margin-bottom: .35rem; }
+.sp-eyebrow::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #38BDF8; box-shadow: 0 0 10px #38BDF8; }
+.sp-name { font-size: 1.45rem; font-weight: 800; margin: 0 0 .3rem; letter-spacing: -.027em; }
+.sp-sub { font-size: .85rem; color: rgba(255,255,255,.74); line-height: 1.55; }
+.sp-score {
+  font-size: 2rem; font-weight: 800; background: rgba(255,255,255,.14);
+  border: 1px solid rgba(255,255,255,.22); border-radius: 16px; padding: .45rem 1.1rem; line-height: 1; white-space: nowrap;
+}
+
+/* ── BADGES & TAGS ─────────────────────────────────────────────────────── */
+.badge { display: inline-block; font-weight: 700; font-size: .76rem; padding: .22rem .75rem; border-radius: 999px; letter-spacing: .01em; }
+.b-green  { background: var(--b-green-bg);  color: var(--b-green-fg);  border: 1px solid var(--b-green-bd); }
+.b-violet { background: var(--b-violet-bg); color: var(--b-violet-fg); border: 1px solid var(--b-violet-bd); }
+.b-amber  { background: var(--b-amber-bg);  color: var(--b-amber-fg);  border: 1px solid var(--b-amber-bd); }
+.b-rose   { background: var(--b-rose-bg);   color: var(--b-rose-fg);   border: 1px solid var(--b-rose-bd); }
+
+.tag {
+  display: inline-flex; align-items: center; background: var(--tag-bg); color: var(--tag-fg);
+  border: 1px solid var(--tag-bd); font-size: .73rem; font-weight: 600; font-family: var(--font-mono);
+  padding: .18rem .65rem; border-radius: 8px; margin: .1rem; transition: filter .15s;
+}
+.tag:hover { filter: brightness(1.08); }
+
+/* ── STEPS ─────────────────────────────────────────────────────────────── */
+.step { padding: .35rem .15rem; }
+.step-n { font-size: .62rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; color: var(--brand-ink); margin-bottom: .5rem; display: flex; align-items: center; gap: .45rem; }
+.step-n::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.step-icon { font-size: 1.8rem; display: block; margin-bottom: .5rem; }
+.step-t { font-size: .98rem; font-weight: 700; color: var(--tx); margin-bottom: .35rem; }
+.step-b { font-size: .83rem; color: var(--tx-3); line-height: 1.68; }
+
+/* ── BUTTONS ───────────────────────────────────────────────────────────── */
+div.stButton > button[kind="primary"] {
+  background: var(--grad-brand) !important; border: none !important;
+  border-radius: var(--radius) !important; padding: .85rem 1.4rem !important;
+  font-family: var(--font) !important; font-weight: 700 !important; font-size: 1.02rem !important;
+  letter-spacing: .01em !important; color: #fff !important;
+  box-shadow: 0 10px 30px var(--brand-glow) !important;
+  transition: filter .2s, box-shadow .2s, transform .12s !important;
+}
+div.stButton > button[kind="primary"]:hover {
+  filter: brightness(1.08) !important; box-shadow: 0 16px 40px var(--brand-glow) !important; transform: translateY(-1px) !important;
+}
+div.stButton > button[kind="primary"]:active { transform: translateY(0) !important; }
+div.stButton > button[kind="secondary"] {
+  background: var(--surface) !important; border: 1px solid var(--border-2) !important;
+  border-radius: var(--radius) !important; color: var(--tx) !important; font-weight: 600 !important;
+}
+div.stDownloadButton > button {
+  border-radius: var(--radius) !important; font-weight: 700 !important; font-family: var(--font) !important;
+  border: 1.5px solid var(--brand) !important; color: var(--brand-ink) !important;
+  background: transparent !important; transition: background .15s, color .15s !important;
+}
+div.stDownloadButton > button:hover { background: var(--brand) !important; color: #fff !important; }
+
+/* ── TABS (React-Aria, Streamlit 1.66) ─────────────────────────────────── */
+[data-testid="stTabs"] [role="tablist"] { gap: .3rem; border-bottom: 1.5px solid var(--border) !important; }
+[data-testid="stTab"] {
+  border-radius: 10px 10px 0 0 !important; padding: .55rem 1.1rem !important;
+  font-family: var(--font) !important; font-weight: 600 !important; font-size: .87rem !important;
+  color: var(--tx-3) !important; transition: color .15s, background .15s;
+}
+[data-testid="stTab"]:hover { color: var(--tx) !important; background: var(--surface-2) !important; }
+[data-testid="stTab"][aria-selected="true"] { color: var(--brand-ink) !important; }
+[data-testid="stTab"] p { color: inherit !important; }
+
+/* ── EXPANDERS ─────────────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+  border: 1px solid var(--border) !important; border-radius: var(--radius) !important;
+  background: var(--surface) !important; overflow: hidden; transition: border-color .2s !important;
+}
+[data-testid="stExpander"]:hover { border-color: color-mix(in srgb, var(--brand) 30%, transparent) !important; }
+[data-testid="stExpander"] summary { font-weight: 600 !important; }
+[data-testid="stExpander"] summary:hover { color: var(--brand-ink) !important; }
+
+/* ── PROGRESS ──────────────────────────────────────────────────────────── */
+[data-testid="stProgressBar"] > div { background: var(--surface-2) !important; border-radius: 999px !important; overflow: hidden; }
+[data-testid="stProgressBar"] > div > div { background: var(--grad-brand) !important; border-radius: 999px !important; }
+
+/* ── MISC WIDGET POLISH ────────────────────────────────────────────────── */
+[data-testid="stTextArea"] textarea {
+  border-radius: var(--radius-sm) !important; font-family: var(--font) !important; font-size: .87rem !important;
+  background: var(--surface) !important; color: var(--tx) !important;
+}
+[data-testid="stAlert"] { border-radius: var(--radius) !important; }
+[data-testid="stCaptionContainer"] p { color: var(--tx-3) !important; font-size: .82rem; }
+hr { border-color: var(--border) !important; }
+
+/* Appearance selector (segmented control, `theme_seg` key) */
+[data-testid="stElementContainer"][class*="st-key-theme_seg"] { margin-bottom: .15rem; width: 100% !important; }
+[class*="st-key-theme_seg"] .stButtonGroup,
+[class*="st-key-theme_seg"] [role="radiogroup"] { width: 100% !important; max-width: 100% !important; }
+[class*="st-key-theme_seg"] [role="radiogroup"] { gap: 0 !important; }
+[class*="st-key-theme_seg"] button {
+  flex: 1 1 0 !important;
+  display: flex !important; align-items: center; justify-content: center;
+  font-family: var(--font) !important; font-weight: 600 !important; font-size: .85rem !important;
+  border-radius: 9px !important; padding: 0 .4rem !important; min-height: 36px;
+}
+[class*="st-key-theme_seg"] button * { font-size: inherit !important; }
+[class*="st-key-theme_seg"] button p { margin: 0 !important; line-height: 1.1 !important; }
+[class*="st-key-theme_seg"] button [data-testid="stIconEmoji"] { font-size: 1.08em !important; }
+
+/* ── FOOTER ────────────────────────────────────────────────────────────── */
+.footer {
+  text-align: center; color: var(--tx-3); font-size: .75rem;
+  padding: 2rem 0 .5rem; letter-spacing: .01em; border-top: 1px solid var(--border); margin-top: 2rem;
+}
+.footer a { color: var(--brand-ink); text-decoration: none; font-weight: 600; }
+.footer a:hover { text-decoration: underline; }
+"""
 
 
-def _score_badge(score: float) -> str:
-    """Return a coloured HTML badge for a 0-100 score."""
+def _css_for(base: str) -> str:
+    """Return the stylesheet with the resolved palette baked into ``:root``."""
+    tokens = "\n".join(f"  {k}: {v};" for k, v in PALETTES[base].items())
+    return _CSS_TEMPLATE.replace("/*__TOKENS__*/", tokens)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  THEME ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+if "theme_mode" not in st.session_state:
+    st.session_state["theme_mode"] = "Auto"
+
+# Capture the OS colour-scheme once per session — ``st.context.theme.type`` is
+# authoritative on the first run, and this caches it so Auto keeps following the
+# OS even after the user toggles Light/Dark manually.
+if "_os_scheme" not in st.session_state:
+    try:
+        _t = st.context.theme.type
+    except Exception:  # pragma: no cover - very old Streamlit
+        _t = None
+    st.session_state["_os_scheme"] = _t if _t in ("light", "dark") else "light"
+
+
+def resolve_base() -> str:
+    """Map the Light/Auto/Dark selector to a concrete 'light' | 'dark' base."""
+    mode = st.session_state.get("theme_mode", "Auto")
+    if mode == "Light":
+        return "light"
+    if mode == "Dark":
+        return "dark"
+    return st.session_state.get("_os_scheme", "light")
+
+
+def apply_native_theme(base: str) -> None:
+    """Switch Streamlit's native theme, rerunning once when it actually changes."""
+    if st.session_state.get("_applied_base") == base:
+        return
+    try:
+        changed = False
+        for key, value in NATIVE_THEME[base].items():
+            try:
+                if st.get_option(key) != value:
+                    changed = True
+                st._config.set_option(key, value)  # noqa: SLF001
+            except Exception:
+                logger.warning("Could not set theme option %s", key)
+        st.session_state["_applied_base"] = base
+        if changed:
+            st.rerun()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Native theme switch unavailable: %s", exc)
+        st.session_state["_theme_fallback"] = True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+def _badge(score: float) -> str:
     if score >= 75:
-        cls = "badge-green"
-    elif score >= 50:
-        cls = "badge-indigo"
-    elif score >= 25:
-        cls = "badge-amber"
-    else:
-        cls = "badge-red"
-    return f'<span class="badge {cls}">{score:.1f}%</span>'
+        return f'<span class="badge b-green">{score:.1f}%</span>'
+    if score >= 50:
+        return f'<span class="badge b-violet">{score:.1f}%</span>'
+    if score >= 25:
+        return f'<span class="badge b-amber">{score:.1f}%</span>'
+    return f'<span class="badge b-rose">{score:.1f}%</span>'
 
 
 @st.cache_resource(show_spinner="Loading language model…")
@@ -217,17 +583,16 @@ def _load_nlp_cached() -> object:
     return get_nlp()
 
 
-def _read_upload(uploaded_file: object) -> Tuple[str, bytes]:
-    """Read a Streamlit UploadedFile into memory with size guard."""
-    name = sanitize_filename(getattr(uploaded_file, "name", "unnamed"))
+def _read_upload(uf: object) -> Tuple[str, bytes]:
+    name = sanitize_filename(getattr(uf, "name", "unnamed"))
     try:
-        data: bytes = uploaded_file.getvalue()  # type: ignore[attr-defined,union-attr]
+        data: bytes = uf.getvalue()  # type: ignore[attr-defined]
     except Exception as exc:
         raise ValueError(f"Could not read '{name}': {exc}") from exc
     if len(data) > MAX_FILE_SIZE_BYTES:
         raise ValueError(
-            f"'{name}' is {len(data) / 1_048_576:.1f} MB "
-            f"(limit {MAX_FILE_SIZE_BYTES // 1_048_576} MB)."
+            f"'{name}' is {len(data)/1_048_576:.1f} MB "
+            f"(limit {MAX_FILE_SIZE_BYTES//1_048_576} MB)."
         )
     if not data:
         raise ValueError(f"'{name}' is empty.")
@@ -235,16 +600,10 @@ def _read_upload(uploaded_file: object) -> Tuple[str, bytes]:
 
 
 def _process_batch(
-    jd_text: str, resume_files: list, remove_pii: bool, max_features: int, top_gaps: int
+    jd_text: str, resume_files: list, remove_pii: bool,
+    max_features: int, top_gaps: int,
 ) -> Tuple[List[RankedCandidate], dict, List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """Extract -> preprocess -> rank.
-
-    Returns:
-        (candidates, meta, failures, scanned_notes) where failures are
-        hard errors (corrupt/encrypted/invalid) and scanned_notes are
-        image-only docs reported separately as warnings.
-    """
-    t_start = time.perf_counter()
+    t0 = time.perf_counter()
     names: List[str] = []
     raw_texts: List[str] = []
     failures: List[Tuple[str, str]] = []
@@ -257,36 +616,27 @@ def _process_batch(
             try:
                 text = extract_text(data, safe_name)
             except ScannedDocumentError as exc:
-                scanned.append((orig, str(exc)))
-                logger.warning("Scanned document skipped: %s", orig)
-                continue
+                scanned.append((orig, str(exc))); continue
             except EncryptedDocumentError as exc:
-                failures.append((orig, f"Encrypted: {exc}"))
-                logger.warning("Encrypted document skipped: %s", orig)
-                continue
+                failures.append((orig, f"Encrypted: {exc}")); continue
             except (FileValidationError, TextExtractionError) as exc:
-                failures.append((orig, str(exc)))
-                logger.warning("Extraction failed for %s: %s", orig, exc)
-                continue
+                failures.append((orig, str(exc))); continue
             finally:
-                del data  # free bytes promptly
+                del data
             if len(text.strip()) < 10:
-                scanned.append(
-                    (orig, "Almost no selectable text found — likely scanned images.")
-                )
-                continue
+                scanned.append((orig, "Almost no selectable text — likely scanned.")); continue
             names.append(safe_name)
             raw_texts.append(text)
-        except ValueError as exc:  # size / empty / read errors
+        except ValueError as exc:
             failures.append((orig, str(exc)))
-        except Exception as exc:  # per-file isolation: one bad file ≠ total failure
+        except Exception as exc:
             logger.exception("Unexpected error for %s", orig)
-            failures.append((orig, f"Unexpected error: {exc}"))
+            failures.append((orig, f"Unexpected: {exc}"))
 
     if not names:
         raise ValueError(
             "No valid resumes could be extracted. "
-            "Files may be scanned images, encrypted, or corrupted — see warnings above."
+            "Files may be scanned, encrypted or corrupted."
         )
 
     try:
@@ -299,175 +649,113 @@ def _process_batch(
         jd_proc, resumes_proc, names,
         max_features=max_features, top_gap_terms=top_gaps,
     )
-    meta["total_pipeline_ms"] = round((time.perf_counter() - t_start) * 1000.0, 2)
+    meta["total_pipeline_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
     return candidates, meta, failures, scanned
 
 
-# ---------------------------------------------------------------- sidebar
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR  (rendered first so the appearance selector updates the theme)
+# ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("### 📄 Smart Ranker")
-    st.caption("Objective resume screening · TF-IDF + cosine similarity")
-    theme = st.segmented_control(
-        "Appearance",
-        options=["Light", "Auto", "Dark"],
-        default="Auto",
-        key="theme_mode",
-        help="Light / Dark switch Streamlit's native theme (every widget, "
-        "table and chart re-renders perfectly). Auto follows your OS setting.",
+    st.markdown("""
+<div class="sb-logo">
+  <div class="sb-logo-mark">📄</div>
+  <div>
+    <div class="sb-logo-text-main">Smart Ranker</div>
+    <div class="sb-logo-text-sub">Resume Intelligence</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="sb-cap">Appearance</div>', unsafe_allow_html=True)
+    _sel = st.segmented_control(
+        "Theme", ["Light", "Auto", "Dark"],
+        default=st.session_state.get("theme_mode", "Auto"),
+        format_func=lambda o: _THEME_LABELS.get(o, o),
+        key="theme_seg", label_visibility="collapsed",
     )
+    # The widget only returns a value once the user picks; keep the stored mode.
+    if _sel is not None:
+        st.session_state["theme_mode"] = _sel
     if st.session_state.get("_theme_fallback"):
         st.caption("⚠️ In-app switch blocked here — use ⋮ → Settings → Appearance.")
+
     st.divider()
-    with st.container(border=True):
-        st.markdown("**⚙️ Analysis settings**")
-        remove_pii = st.checkbox("Redact PII (emails / phones / URLs)", value=True)
-        max_features = st.slider("TF-IDF max features", 1_000, 20_000, 10_000, step=1_000)
-        top_gaps = st.slider("Skill gaps per candidate", 5, 30, 15)
-        min_score = st.slider("Minimum score filter (%)", 0, 100, 0)
-    with st.container(border=True):
-        st.markdown("**🔒 Privacy & limits**")
-        st.caption(
-            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}  \n"
-            f"Max {MAX_FILE_SIZE_BYTES // 1_048_576} MB / file · {MAX_RESUMES} resumes max  \n"
-            "In-memory only — nothing is stored."
+
+    st.markdown('<div class="sb-cap">Analysis</div>', unsafe_allow_html=True)
+    with st.container(border=True, key="side_settings"):
+        remove_pii = st.checkbox("🔒 Redact PII (emails / phones / URLs)", value=True)
+        st.markdown("<hr style='margin:.55rem 0;'>", unsafe_allow_html=True)
+        max_features = st.slider(
+            "Vocabulary size", 1_000, 20_000, 10_000, step=1_000,
+            help="TF-IDF max features. 10 000 is the recommended default.",
+        )
+        top_gaps = st.slider(
+            "Skill gaps per candidate", 5, 30, 15,
+            help="Max JD keywords to surface as missing per resume.",
+        )
+        min_score = st.slider(
+            "Min match threshold (%)", 0, 100, 0,
+            help="Hide candidates below this score.",
         )
 
-# ------------------------------------------------- native theme engine
-# Streamlit renders tables, charts, alerts and widgets itself, so any
-# hand-written "dark mode" CSS always leaves mismatched light widgets
-# behind. Instead we switch Streamlit's NATIVE base theme (all widgets
-# re-render perfectly) and only adapt our own small brand classes.
-#
-# How the live switch works: Streamlit re-sends the theme inside the
-# ``new_session`` message on *every* script run (at SCRIPT_STARTED). So
-# mutating ``theme.base`` and calling ``st.rerun()`` makes the next run
-# carry the new theme to the browser. Brand CSS is keyed off the
-# deterministic resolved value — NOT ``st.context.theme``, which lags one
-# run behind and made the switch look broken.
-# NOTE: set_option mutates process-global config — fine for this local
-# single-user app; on a multi-user server prefer the per-user Settings menu.
+    st.divider()
 
-if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "Auto"
+    st.markdown('<div class="sb-cap">Privacy &amp; limits</div>', unsafe_allow_html=True)
+    with st.container(border=True, key="side_privacy"):
+        st.markdown(f"""
+<div class="sb-info">
+  <div>📎 <b>Formats:</b> {', '.join(s.upper().lstrip('.') for s in sorted(ALLOWED_EXTENSIONS))}</div>
+  <div>📏 <b>Max size:</b> {MAX_FILE_SIZE_BYTES//1_048_576} MB per file</div>
+  <div>📦 <b>Batch:</b> Up to {MAX_RESUMES} resumes</div>
+  <div>🔐 <b>Storage:</b> In-memory only</div>
+</div>""", unsafe_allow_html=True)
 
+    st.divider()
 
-def _resolved_base() -> str:
-    """Resolve Light/Auto/Dark to a concrete native base ('light'/'dark')."""
-    mode = st.session_state.get("theme_mode", "Auto")
-    if mode == "Dark":
-        return "dark"
-    if mode == "Light":
-        return "light"
-    # Auto: follow the OS preference reported once by the JS detector below;
-    # default to light until it reports back.
-    return "dark" if st.query_params.get("os_theme") == "dark" else "light"
-
-
-def _apply_native_theme(want: str) -> None:
-    """Apply the native base theme with full palette; reruns once only when it changes.
-    """
-    PALETTES = {
-        "light": {
-            "theme.base": "light",
-            "theme.primaryColor": "#1D4ED8",
-            "theme.backgroundColor": "#F7F8FC",
-            "theme.secondaryBackgroundColor": "#FFFFFF",
-            "theme.textColor": "#0F172A",
-        },
-        "dark": {
-            "theme.base": "dark",
-            "theme.primaryColor": "#38BDF8",
-            "theme.backgroundColor": "#0B1120",
-            "theme.secondaryBackgroundColor": "#131A33",
-            "theme.textColor": "#E2E8F0",
-        },
-    }
-    if st.session_state.get("_requested_base") == want:
-        return
-    try:
-        changes = []
-        current_base = st.get_option("theme.base") or "light"
-        if current_base != want:
-            changes.append(("theme.base", want))
-        pal = PALETTES[want]
-        for k, v in pal.items():
-            if k == "theme.base":
-                continue
-            cur = st.get_option(k)
-            if cur != v:
-                changes.append((k, v))
-        if changes or current_base != want:
-            st.session_state["_requested_base"] = want
-            for k, v in pal.items():
-                try:
-                    st._config.set_option(k, v)  # noqa: SLF001
-                except Exception:
-                    logger.warning("Failed setting %s", k)
-            st.rerun()
-    except Exception as exc:
-        logger.warning("Native theme switch unavailable: %s", exc)
-        st.session_state["_theme_fallback"] = True
+    st.markdown("""
+<div class="dev-card">
+  <div class="dev-av">👨‍💻</div>
+  <div class="dev-name">suman .builds</div>
+  <div class="dev-role">Full-Stack Developer &amp; AI Engineer</div>
+  <a class="dev-btn" href="https://suman-rana.netlify.app" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+      <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+    </svg>
+    View Portfolio
+  </a>
+</div>""", unsafe_allow_html=True)
 
 
-# One-time OS detection for Auto mode: runs only on fresh loads without
-# uploads (sets ?os_theme= then reloads once; never loops).
-# NOTE: a <script> injected via st.markdown is NOT executed (Streamlit
-# inserts HTML via innerHTML), so we embed it in an iframe that runs JS.
-# ``st.iframe`` is the modern API; fall back to ``components.html`` on
-# older Streamlit versions.
-if st.session_state.theme_mode == "Auto" and "os_theme" not in st.query_params:
-    _os_detect_html = """<script>
-try {
-  var dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  var url = new URL(window.top.location.href);
-  if (!url.searchParams.get('os_theme')) {
-    url.searchParams.set('os_theme', dark ? 'dark' : 'light');
-    window.top.location.replace(url.toString());
-  }
-} catch (e) {}
-</script>"""
-    if hasattr(st, "iframe"):
-        st.iframe(_os_detect_html, height=1)
-    else:  # pragma: no cover - older Streamlit
-        import streamlit.components.v1 as components
-
-        components.html(_os_detect_html, height=0)
-
-_ACTIVE_BASE = _resolved_base()
-_apply_native_theme(_ACTIVE_BASE)
+# ═══════════════════════════════════════════════════════════════════════════════
+#  APPLY THEME
+# ═══════════════════════════════════════════════════════════════════════════════
+_ACTIVE = resolve_base()
+st.markdown(f"<style>{_css_for(_ACTIVE)}</style>", unsafe_allow_html=True)
+apply_native_theme(_ACTIVE)
 
 
-# Adapt ONLY our own brand classes to the active native theme.
-# (Native widgets/tables/charts/alerts already match — nothing to fix.)
-if _ACTIVE_BASE == "dark":
-    st.markdown(
-        """<style>
-.section-title { color: #F1F5F9; }
-.section-sub { color: #94A3B8; }
-.kpi .kpi-value { color: #F8FAFC; }
-.kpi .kpi-label, .kpi .kpi-sub { color: #94A3B8; }
-.skill-tag { background: #1E2A5A; color: #BAE6FD; border-color: #0284C7; }
-.footer { color: #64748B; }
-</style>""",
-        unsafe_allow_html=True,
-    )
-
-# ---------------------------------------------------------------- hero (centered, aligned)
-st.markdown(
-    """
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HERO
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
 <div class="hero">
-  <h1>Smart Resume Screening &amp; Ranking</h1>
-  <p>Upload a job description and candidate resumes — get explainable match scores,
-  ranked shortlists and per-candidate skill gaps in seconds.</p>
-  <div class="pills">
-    <span class="pill">In-memory · zero storage</span>
-    <span class="pill">PII redaction built-in</span>
-    <span class="pill">50+ resumes &lt; 500 ms scoring</span>
+  <div class="hero-inner">
+    <div class="hero-badge"><span class="pulse"></span> AI-Powered Resume Intelligence</div>
+    <h1>Screen &amp; Rank Resumes<br><em>in Seconds</em></h1>
+    <p>Upload a job description and up to 50 candidate resumes. Get explainable
+    match scores, a ranked shortlist and per-candidate skill-gap analysis —
+    all in under a second, nothing stored.</p>
+    <div class="hero-chips">
+      <span class="hero-chip">⚡ &lt; 500 ms · 50 resumes</span>
+      <span class="hero-chip">🔒 Zero storage</span>
+      <span class="hero-chip">🛡️ PII redaction</span>
+      <span class="hero-chip">📊 TF-IDF · cosine</span>
+    </div>
   </div>
 </div>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 try:
     _load_nlp_cached()
@@ -475,60 +763,71 @@ except RuntimeError as exc:
     st.error(f"⚠️ {exc}")
     st.stop()
 
-# ------------------------------------------------- inputs (aligned cards)
-st.markdown('<div class="section-label">Step 01 — Inputs</div>', unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  INPUTS
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="sec-cap">Step 01 — Inputs</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec-title">Provide the role &amp; the candidates</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="section-title">Provide the role and the candidates</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="section-sub">Both panels are aligned — complete each side, then run the ranking.</div>',
+    '<div class="sec-sub">Paste or upload a Job Description on the left, '
+    'then upload candidate resumes on the right. Both are required to run.</div>',
     unsafe_allow_html=True,
 )
 
 col_jd, col_res = st.columns(2, gap="large")
 
 with col_jd:
-    with st.container(border=True):
-        st.markdown("**1️⃣ &nbsp; Job description**")
-        st.caption("Upload a file or paste the text — either one is enough.")
+    with st.container(border=True, key="card_jd"):
+        st.markdown("""
+<div class="uc-head">
+  <div class="uc-icon uc-violet">📋</div>
+  Job Description
+</div>""", unsafe_allow_html=True)
+        st.caption("Upload PDF / DOCX / TXT — or paste the text below.")
         jd_file = st.file_uploader(
-            "Upload JD (PDF / DOCX / TXT)",
-            type=["pdf", "docx", "txt"],
-            key="jd",
+            "Upload JD", type=["pdf", "docx", "txt"],
+            key="jd", label_visibility="collapsed",
         )
         jd_pasted = st.text_area(
-            "Or paste JD text",
-            height=180,
-            placeholder="Paste the job description here…",
+            "Or paste the JD here",
+            height=175, placeholder="Paste the full job description here…",
         )
 
 with col_res:
-    with st.container(border=True):
-        st.markdown(f"**2️⃣ &nbsp; Candidate resumes** <span style='color:#64748B'>(up to {MAX_RESUMES})</span>")
-        st.caption("PDF or DOCX · each file processed in memory, in isolation.")
+    with st.container(border=True, key="card_res"):
+        st.markdown(f"""
+<div class="uc-head">
+  <div class="uc-icon uc-sky">📁</div>
+  Candidate Resumes
+  <span class="uc-hint">&nbsp;(up to {MAX_RESUMES})</span>
+</div>""", unsafe_allow_html=True)
+        st.caption("PDF or DOCX only · processed in memory, never written to disk.")
         resume_files = st.file_uploader(
-            "Upload resumes",
-            type=["pdf", "docx"],
+            "Upload resumes", type=["pdf", "docx"],
             accept_multiple_files=True,
-            key="resumes",
+            key="resumes", label_visibility="collapsed",
         )
-        # Fixed-height status strip keeps both cards visually aligned.
         if resume_files:
             if len(resume_files) > MAX_RESUMES:
                 st.warning(f"Only the first {MAX_RESUMES} files will be processed.")
                 resume_files = resume_files[:MAX_RESUMES]
-            st.success(f"✅ {len(resume_files)} resume(s) ready for ranking.")
+            st.success(
+                f"✅ {len(resume_files)} resume{'s' if len(resume_files) > 1 else ''} ready."
+            )
         else:
-            st.info("No resumes yet — upload at least one to enable ranking.")
+            st.info("⬆️ Upload at least one resume to enable ranking.")
 
-# Centered CTA
+st.markdown("<div style='height:.9rem'></div>", unsafe_allow_html=True)
 cta_l, cta_c, cta_r = st.columns([1, 2, 1])
 with cta_c:
-    analyze = st.button("🚀 Rank Candidates", type="primary", use_container_width=True)
+    analyze = st.button("🚀  Rank Candidates", type="primary", width="stretch")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
 if analyze:
-    # ---- empty-input validation (JD + at least one resume required)
     jd_text = ""
     if jd_file is not None:
         try:
@@ -538,225 +837,277 @@ if analyze:
                 try:
                     jd_text = raw.decode("utf-8", errors="ignore")
                 except Exception as exc:
-                    st.error(f"Could not decode JD text file: {exc}")
-                    st.stop()
+                    st.error(f"Could not decode JD text file: {exc}"); st.stop()
+                finally:
+                    del raw
                 if len(jd_text.strip()) < 10:
-                    st.error("JD text file appears empty or image-only.")
-                    st.stop()
+                    st.error("JD text file appears empty."); st.stop()
             else:
                 try:
                     jd_text = extract_text(raw, fname)
                 except ScannedDocumentError as exc:
-                    st.warning(f"JD looks scanned/image-only: {exc}")
-                    st.stop()
+                    st.warning(f"JD appears scanned/image-only: {exc}"); st.stop()
                 except EncryptedDocumentError as exc:
-                    st.error(f"JD is encrypted: {exc}")
-                    st.stop()
+                    st.error(f"JD is encrypted: {exc}"); st.stop()
                 except (FileValidationError, TextExtractionError) as exc:
-                    st.error(f"Could not read Job Description: {exc}")
-                    st.stop()
+                    st.error(f"Could not read JD: {exc}"); st.stop()
+                finally:
+                    del raw
         except Exception as exc:
-            st.error(f"Could not read Job Description: {exc}")
-            st.stop()
+            st.error(f"Could not read JD: {exc}"); st.stop()
+
     if not jd_text.strip() and jd_pasted.strip():
         jd_text = jd_pasted.strip()
     if not jd_text.strip():
-        st.error("Please upload or paste a Job Description before ranking.")
-        st.stop()
+        st.error("Please provide a Job Description before ranking."); st.stop()
     if len(jd_text.strip()) < 10:
-        st.error("Job Description is too short — please provide more detail.")
-        st.stop()
+        st.error("Job Description is too short — please provide more detail."); st.stop()
     if not resume_files:
-        st.error("Please upload at least one resume before ranking.")
-        st.stop()
+        st.error("Please upload at least one resume."); st.stop()
 
-    with st.spinner("Extracting, preprocessing & scoring…"):
+    with st.spinner("⚙️ Extracting · preprocessing · scoring…"):
         try:
             candidates, meta, failures, scanned = _process_batch(
-                jd_text, list(resume_files), remove_pii, max_features, top_gaps
+                jd_text, list(resume_files), remove_pii, max_features, top_gaps,
             )
         except ValueError as exc:
-            st.error(str(exc))
-            st.stop()
+            st.error(str(exc)); st.stop()
         except RuntimeError as exc:
-            st.error(str(exc))
-            st.stop()
-        except Exception as exc:  # defensive: never show a raw traceback
+            st.error(str(exc)); st.stop()
+        except Exception as exc:
             logger.exception("Batch failed")
-            st.error(f"Ranking failed unexpectedly: {exc}")
-            st.stop()
+            st.error(f"Ranking failed unexpectedly: {exc}"); st.stop()
 
-    # ---- per-file graceful-degradation notices
-    for fname, err in failures:
-        st.error(f"❌ Skipped **{sanitize_filename(fname)}**: {err}")
-    for fname, note in scanned:
-        st.warning(
-            f"📷 **{sanitize_filename(fname)}** appears to be a scanned / image-only "
-            f"document and was skipped. {note}"
-        )
+    # Persist so later reruns (theme switch, slider tweaks, tab switch) keep the
+    # shortlist on screen instead of dropping back to the empty state.
+    st.session_state["_results"] = (candidates, meta, failures, scanned)
 
-    # ---- zero-overlap guard
+
+_results_view = st.session_state.get("_results")
+if _results_view is not None:
+    candidates, meta, failures, scanned = _results_view
+
+    for fn, err in failures:
+        st.error(f"❌ Skipped **{sanitize_filename(fn)}**: {err}")
+    for fn, note in scanned:
+        st.warning(f"📷 **{sanitize_filename(fn)}** is scanned/image-only — skipped. {note}")
+
     if candidates and all(c.score == 0.0 for c in candidates):
         st.warning(
-            "⚠️ Zero vocabulary overlap: the JD and resumes share no common "
-            "keywords after preprocessing, so all scores are 0.0%. Try a more "
-            "detailed JD or check that resumes contain selectable text."
+            "⚠️ Zero vocabulary overlap — all scores are 0.0 %. "
+            "Try a more detailed JD or check resumes contain selectable text."
         )
 
-    # ---- score filter
     visible = [c for c in candidates if c.score >= min_score]
     if not visible:
-        st.warning("No candidates meet the minimum score filter.")
+        st.warning("No candidates meet the minimum score. Try lowering the threshold.")
         st.stop()
 
-    # ------------------------------------------------ results header
-    st.markdown('<div class="section-label">Step 02 — Results</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Ranked shortlist</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-sub">Scores are TF-IDF cosine similarity (0–100%). '
-        "Higher means stronger keyword alignment with the JD.</div>",
-        unsafe_allow_html=True,
-    )
+    # ── Results header ────────────────────────────────────────────────────────
+    hdr_l, hdr_r = st.columns([4, 1], vertical_alignment="center")
+    with hdr_l:
+        st.markdown('<div class="sec-cap">Step 02 — Results</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">Ranked shortlist</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sec-sub">Scores are TF-IDF cosine similarity (0–100 %). '
+            'Higher = stronger keyword alignment with the JD.</div>',
+            unsafe_allow_html=True,
+        )
+    with hdr_r:
+        if st.button("↺  New analysis", width="stretch"):
+            st.session_state.pop("_results", None)
+            st.rerun()
 
-    # ---- KPI cards (aligned, centered)
+    # ── KPI row ───────────────────────────────────────────────────────────────
     scores = [c.score for c in visible]
-    avg_score = sum(scores) / len(scores)
+    avg_s = sum(scores) / len(scores)
     k1, k2, k3, k4 = st.columns(4, gap="medium")
-    with k1:
-        with st.container(border=True):
-            st.markdown(
-                f'<div class="kpi"><div class="kpi-label">Candidates</div>'
-                f'<div class="kpi-value">{len(visible)}</div>'
-                f'<div class="kpi-sub">ranked</div></div>',
-                unsafe_allow_html=True,
-            )
-    with k2:
-        with st.container(border=True):
-            st.markdown(
-                f'<div class="kpi"><div class="kpi-label">Top score</div>'
-                f'<div class="kpi-value">{max(scores):.1f}%</div>'
-                f'<div class="kpi-sub">{visible[0].name}</div></div>',
-                unsafe_allow_html=True,
-            )
-    with k3:
-        with st.container(border=True):
-            st.markdown(
-                f'<div class="kpi"><div class="kpi-label">Average</div>'
-                f'<div class="kpi-value">{avg_score:.1f}%</div>'
-                f'<div class="kpi-sub">across shortlist</div></div>',
-                unsafe_allow_html=True,
-            )
-    with k4:
-        with st.container(border=True):
-            st.markdown(
-                f'<div class="kpi"><div class="kpi-label">Pipeline</div>'
-                f'<div class="kpi-value">{meta.get("total_pipeline_ms", 0):.0f}<span style="font-size:.9rem"> ms</span></div>'
-                f'<div class="kpi-sub">vocab {int(meta.get("vocab_size", 0))}</div></div>',
-                unsafe_allow_html=True,
-            )
+    for col, key, ico, lbl, val, sub in [
+        (k1, "kpi_1", "👥", "Candidates", str(len(visible)), "ranked"),
+        (k2, "kpi_2", "🥇", "Top score", f"{max(scores):.1f}%", visible[0].name),
+        (k3, "kpi_3", "📈", "Average", f"{avg_s:.1f}%", "across shortlist"),
+        (k4, "kpi_4", "⚡", "Pipeline", f"{meta.get('total_pipeline_ms',0):.0f}",
+         f"ms · {int(meta.get('vocab_size',0)):,} tokens"),
+    ]:
+        with col:
+            with st.container(border=True, key=key):
+                st.markdown(
+                    f'<div class="kpi">'
+                    f'<div class="kpi-ico">{ico}</div>'
+                    f'<div class="kpi-lbl">{lbl}</div>'
+                    f'<div class="kpi-val">{val}</div>'
+                    f'<div class="kpi-sub">{sub}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-    df = pd.DataFrame(
-        [
-            {
-                "": {1: "🥇", 2: "🥈", 3: "🥉"}.get(c.rank, "—"),
-                "Rank": c.rank,
-                "Candidate": c.name,
-                "Match %": c.score,
-                "Top missing skills": ", ".join(c.skill_gaps[:8]) or "—",
-            }
-            for c in visible
-        ]
-    )
+    # ── DataFrame ─────────────────────────────────────────────────────────────
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    df = pd.DataFrame([
+        {
+            "": medals.get(c.rank, f"#{c.rank}"),
+            "Rank": c.rank,
+            "Candidate": c.name,
+            "Match %": c.score,
+            "Key gaps": ", ".join(c.skill_gaps[:8]) or "—",
+        }
+        for c in visible
+    ])
 
-    # ---- top-candidate spotlight (strongest signal, first thing seen)
+    # ── Spotlight ─────────────────────────────────────────────────────────────
     top = visible[0]
-    st.markdown(
-        f"""
-<div class="spotlight">
-  <div class="spot-label">⭐ Top match</div>
-  <div class="spot-name">#{top.rank} {top.name} — {top.score:.1f}%</div>
-  <div class="spot-sub">Strongest keyword alignment with the JD.
-  {("Key gaps: " + ", ".join(top.skill_gaps[:5])) if top.skill_gaps else "Excellent coverage — no major gaps."}</div>
-</div>
-        """,
-        unsafe_allow_html=True,
+    gap_txt = (
+        f"Key gaps: {', '.join(top.skill_gaps[:5])}"
+        if top.skill_gaps else "Excellent coverage — no major gaps."
     )
+    st.markdown(f"""
+<div class="spotlight">
+  <div class="sp-left">
+    <div class="sp-eyebrow">Top match</div>
+    <div class="sp-name">#{top.rank} &nbsp; {top.name}</div>
+    <div class="sp-sub">
+      Strongest keyword alignment with the job description.<br>{gap_txt}
+    </div>
+  </div>
+  <div class="sp-right">
+    <div class="sp-score">{top.score:.1f}%</div>
+    {_badge(top.score)}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-    # ---- tabs keep tables / charts / gaps neatly aligned
+    # ── Tabs ──────────────────────────────────────────────────────────────────
     tab_rank, tab_dist, tab_gaps = st.tabs(
-        ["🏆 Rankings", "📊 Score distribution", "🔍 Skill gaps"]
+        ["🏆  Rankings", "📊  Distribution", "🔍  Skill gaps"]
     )
 
     with tab_rank:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.markdown("<div style='height:.35rem'></div>", unsafe_allow_html=True)
+        st.dataframe(
+            df, width="stretch", hide_index=True,
+            column_config={
+                "Match %": st.column_config.ProgressColumn(
+                    "Match %", format="%.1f%%", min_value=0, max_value=100,
+                ),
+            },
+        )
         st.markdown("**Match score by candidate**")
-        st.bar_chart(df.set_index("Candidate")["Match %"])
+        st.bar_chart(df.set_index("Candidate")["Match %"], height=320, color="#7C3AED")
 
     with tab_dist:
+        st.markdown("<div style='height:.35rem'></div>", unsafe_allow_html=True)
         try:
             hist_df = pd.cut(pd.Series(scores), bins=10, include_lowest=True)
             dist = hist_df.value_counts().sort_index()
             dist.index = [f"{iv.left:.0f}–{iv.right:.0f}%" for iv in dist.index]
-            st.bar_chart(dist)
-            st.caption("Distribution of match scores across the shortlist (10 bins).")
+            st.bar_chart(dist, height=320, color="#7C3AED")
+            st.caption(
+                f"Score distribution across {len(visible)} candidates (10 bins). "
+                "Each bar = number of candidates in that score range."
+            )
         except Exception as exc:
             logger.warning("Distribution chart failed: %s", exc)
             st.warning("Could not render score distribution.")
 
     with tab_gaps:
+        st.markdown("<div style='height:.35rem'></div>", unsafe_allow_html=True)
         for c in visible:
-            with st.expander(f"#{c.rank}  {c.name}  —  {c.score:.1f}%", expanded=(c.rank == 1)):
-                st.progress(min(max(c.score / 100.0, 0.0), 1.0))
-                st.markdown(_score_badge(c.score), unsafe_allow_html=True)
+            med = medals.get(c.rank, f"#{c.rank}")
+            with st.expander(f"{med}  {c.name}  —  {c.score:.1f}%", expanded=(c.rank == 1)):
+                p_col, b_col = st.columns([5, 1])
+                with p_col:
+                    st.progress(min(max(c.score / 100.0, 0.0), 1.0))
+                with b_col:
+                    st.markdown(_badge(c.score), unsafe_allow_html=True)
                 if c.skill_gaps:
-                    st.markdown("**Missing / weak JD keywords:**")
                     st.markdown(
-                        " ".join(f'<span class="skill-tag">{s}</span>' for s in c.skill_gaps),
+                        "<div style='margin:.5rem 0 .25rem; font-size:.82rem;"
+                        "font-weight:600; color:var(--tx-3);'>"
+                        "Missing / weak JD keywords:</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        " ".join(f'<span class="tag">{s}</span>' for s in c.skill_gaps),
                         unsafe_allow_html=True,
                     )
                 else:
-                    st.success("Strong keyword coverage — no major gaps detected.")
+                    st.success("✅ Strong keyword coverage — no major gaps detected.")
 
-    # ---- export + details (centered, aligned)
+    # ── Export ────────────────────────────────────────────────────────────────
     st.divider()
-    e_l, e_c, e_r = st.columns([1, 2, 1])
-    with e_c:
-        csv_buf = io.StringIO()
-        df.to_csv(csv_buf, index=False)
+    ex_l, ex_c, ex_r = st.columns([1, 2, 1])
+    with ex_c:
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        csv_str = buf.getvalue()
+        buf.close()
         st.download_button(
-            "⬇️ Download rankings (CSV)",
-            data=csv_buf.getvalue(),
-            file_name="resume_rankings.csv",
-            mime="text/csv",
-            use_container_width=True,
+            "⬇️  Download rankings (CSV)",
+            data=csv_str, file_name="resume_rankings.csv",
+            mime="text/csv", width="stretch",
         )
     with st.expander("ℹ️ Performance & privacy details"):
         st.json({k: v for k, v in meta.items()})
         st.caption(
-            "Time O(N·M) via sparse TF-IDF; space O(nnz) — matrices never densified. "
-            "Files processed in memory (BytesIO) and released immediately; "
-            "no resumes or PII written to disk."
+            "Sparse TF-IDF (O(N·M)) · cosine similarity on CSR matrices · "
+            "no files written to disk · PII optionally redacted before scoring."
         )
-else:
-    # --------------------------------------- premium empty state (aligned)
-    st.markdown('<div class="section-label">How it works</div>', unsafe_allow_html=True)
-    s1, s2, s3 = st.columns(3, gap="medium")
-    with s1:
-        with st.container(border=True):
-            st.markdown("**📥 1 · Upload**")
-            st.caption("JD + up to 50 resumes (PDF/DOCX). Files stay in memory.")
-    with s2:
-        with st.container(border=True):
-            st.markdown("**🧹 2 · Clean & match**")
-            st.caption("PII redaction → spaCy lemmas → TF-IDF cosine similarity.")
-    with s3:
-        with st.container(border=True):
-            st.markdown("**🏆 3 · Shortlist**")
-            st.caption("Ranked table, charts, skill gaps + one-click CSV export.")
-    st.info("👆 Upload a JD and resumes above, then click **Rank Candidates**.")
 
+else:
+    # ═════════════════════════════════════════════════════════════════════════
+    #  EMPTY STATE — How it works
+    # ═════════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="sec-cap">How it works</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sec-title">Three steps to a ranked shortlist</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="sec-sub">No account required · nothing stored · '
+        'results in under a second.</div>',
+        unsafe_allow_html=True,
+    )
+
+    s1, s2, s3 = st.columns(3, gap="medium")
+    for col, key, num, icon, title, body in [
+        (s1, "card_step1", "01", "📥", "Upload",
+         "Drop in a Job Description (PDF, DOCX or TXT) and up to 50 candidate "
+         "resumes. Everything is processed in memory — nothing touches disk."),
+        (s2, "card_step2", "02", "🧠", "Clean &amp; match",
+         "Optional PII redaction → spaCy lemmatization → TF-IDF vectorization → "
+         "sparse cosine similarity. Full pipeline in under 500 ms for 50 resumes."),
+        (s3, "card_step3", "03", "🏆", "Shortlist",
+         "Ranked table with match percentages, interactive score distribution, "
+         "per-candidate skill-gap tags, and one-click CSV export."),
+    ]:
+        with col:
+            with st.container(border=True, key=key):
+                st.markdown(
+                    f'<div class="step">'
+                    f'<div class="step-n">Step {num}</div>'
+                    f'<span class="step-icon">{icon}</span>'
+                    f'<div class="step-t">{title}</div>'
+                    f'<div class="step-b">{body}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("<div style='height:.6rem'></div>", unsafe_allow_html=True)
+    st.info(
+        "👆 &nbsp; Fill in the **Job Description** and **Candidate Resumes** above, "
+        "then click **🚀 Rank Candidates**."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FOOTER
+# ═══════════════════════════════════════════════════════════════════════════════
 st.markdown(
-    '<div class="footer">Smart Resume Ranker · decision support — keep a human in the loop · '
-    "in-memory only, nothing stored</div>",
+    '<div class="footer">'
+    "Smart Resume Ranker &nbsp;·&nbsp; Decision-support tool — keep a human in the loop"
+    " &nbsp;·&nbsp; In-memory only, zero storage"
+    " &nbsp;·&nbsp; Built by "
+    "<a href='https://suman-rana.netlify.app' target='_blank' rel='noopener'>suman .builds</a>"
+    "</div>",
     unsafe_allow_html=True,
 )

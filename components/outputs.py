@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import io
+import logging
 from typing import List, Dict
 
 import pandas as pd
 import streamlit as st
 
 from utils.matcher import RankedCandidate
+
+logger = logging.getLogger(__name__)
 
 
 def _score_badge(score: float) -> str:
@@ -117,6 +120,7 @@ def render_results(candidates: List[RankedCandidate], meta: Dict[str, float], mi
             st.bar_chart(dist)
             st.caption("Distribution of match scores across the shortlist (10 bins).")
         except Exception as exc:
+            logger.warning("Distribution chart failed: %s", exc)
             st.warning("Could not render score distribution.")
 
     with tab_gaps:
@@ -138,9 +142,11 @@ def render_results(candidates: List[RankedCandidate], meta: Dict[str, float], mi
     with e_c:
         csv_buf = io.StringIO()
         df.to_csv(csv_buf, index=False)
+        csv_data = csv_buf.getvalue()
+        csv_buf.close()
         st.download_button(
             "⬇️ Download rankings (CSV)",
-            data=csv_buf.getvalue(),
+            data=csv_data,
             file_name="resume_rankings.csv",
             mime="text/csv",
             use_container_width=True,
