@@ -60,19 +60,35 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .block-container { max-width: 1180px; padding-top: 2rem; padding-bottom: 3rem; }
 
 /* ---- Slim transparent header: keeps the sidebar collapse/expand toggle
-        working, while all other chrome (toolbar / menu) is removed below ---- */
+        working, while all other chrome (menu / deploy) is removed below.
+        NOTE: the sidebar EXPAND button lives *inside* the toolbar, so the
+        toolbar itself must never be display:none. ---- */
 [data-testid="stHeader"],
 header[data-testid="stHeader"],
 header.stAppHeader { background: transparent !important; }
 
-/* ---- Sidebar open/close controls must ALWAYS stay visible & clickable ---- */
-[data-testid^="stSidebarCollapse"],
-[data-testid^="stSidebarCollapsed"] {
-  display: flex !important;
+/* ---- Sidebar open/close controls must ALWAYS stay visible & clickable.
+        Streamlit renders different testids depending on state:
+          * open   -> stSidebarCollapseButton (in stSidebarHeader)
+          * closed -> stExpandSidebarButton   (inside stToolbar) ---- */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stExpandSidebarButton"] {
+  display: inline-flex !important;
   visibility: visible !important;
   opacity: 1 !important;
   pointer-events: auto !important;
 }
+
+/* Make the re-open button pop even over a transparent header. */
+[data-testid="stExpandSidebarButton"] {
+  background: linear-gradient(135deg, #1D4ED8, #06B6D4) !important;
+  color: #FFFFFF !important;
+  border-radius: 10px !important;
+  margin: .5rem !important;
+  padding: .15rem .3rem !important;
+  box-shadow: 0 6px 16px rgba(29,78,216,.35) !important;
+}
+[data-testid="stExpandSidebarButton"] svg { color: #FFFFFF !important; }
 
 /* Hero banner */
 .hero {
@@ -152,13 +168,27 @@ div.stDownloadButton > button {
 [data-testid="stFileUploader"] { border-radius: 12px; }
 [data-testid="stFileUploaderDropzone"] { min-height: 120px; }
 
-/* ---- Remove Streamlit chrome: top-right toolbar, main menu, footer ---- */
-[data-testid="stAppToolbar"],
-div[class*="stAppToolbar"] { display: none !important; }
+/* ---- Remove Streamlit chrome: main menu, deploy button, footer.
+        IMPORTANT: hide only the menu/actions — NOT the whole toolbar, because
+        that would also hide the stExpandSidebarButton used to re-open the
+        collapsed sidebar. ---- */
+[data-testid="stMainMenu"],
+[data-testid="stMainMenuButton"],
+[data-testid="stToolbarActions"],
+[data-testid="stAppDeployButton"],
+div[class*="stAppDeployButton"] { display: none !important; }
 #MainMenu { visibility: hidden !important; }
 footer { visibility: hidden !important; }
 [data-testid="stDecoration"],
 [data-testid="stStatusWidget"] { display: none !important; }
+
+/* Hidden 1px helper iframe (OS-theme detector) — keep it out of layout */
+[data-testid="stIFrame"],
+iframe[title="st.iframe"] {
+  position: absolute !important;
+  width: 1px !important; height: 1px !important;
+  border: 0 !important; opacity: 0 !important; pointer-events: none !important;
+}
 
 /* Center helpers */
 .center { text-align: center; }
@@ -307,32 +337,72 @@ with st.sidebar:
 # hand-written "dark mode" CSS always leaves mismatched light widgets
 # behind. Instead we switch Streamlit's NATIVE base theme (all widgets
 # re-render perfectly) and only adapt our own small brand classes.
+#
+# How the live switch works: Streamlit re-sends the theme inside the
+# ``new_session`` message on *every* script run (at SCRIPT_STARTED). So
+# mutating ``theme.base`` and calling ``st.rerun()`` makes the next run
+# carry the new theme to the browser. Brand CSS is keyed off the
+# deterministic resolved value — NOT ``st.context.theme``, which lags one
+# run behind and made the switch look broken.
 # NOTE: set_option mutates process-global config — fine for this local
-# single-user app; on a multi-user server prefer per-user Settings menu.
-import streamlit.components.v1 as components
+# single-user app; on a multi-user server prefer the per-user Settings menu.
 
 if "theme_mode" not in st.session_state:
     st.session_state.theme_mode = "Auto"
 
 
-def _resolve_theme_mode() -> str:
-    """Resolve Light/Auto/Dark to a concrete Light/Dark choice."""
+def _resolved_base() -> str:
+    """Resolve Light/Auto/Dark to a concrete native base ('light'/'dark')."""
     mode = st.session_state.get("theme_mode", "Auto")
-    if mode != "Auto":
-        return mode
-    os_theme = st.query_params.get("os_theme", "")
-    if os_theme in ("light", "dark"):
-        return "Dark" if os_theme == "dark" else "Light"
-    return "Light"  # before the one-time OS detector below reports back
+    if mode == "Dark":
+        return "dark"
+    if mode == "Light":
+        return "light"
+    # Auto: follow the OS preference reported once by the JS detector below;
+    # default to light until it reports back.
+    return "dark" if st.query_params.get("os_theme") == "dark" else "light"
 
 
-def _apply_native_theme(mode: str) -> None:
-    """Apply the native base theme; reruns once only when it changes."""
-    want = "dark" if mode == "Dark" else "light"
+def _apply_native_theme(want: str) -> None:
+    """Apply the native base theme with full palette; reruns once only when it changes.
+    """
+    PALETTES = {
+        "light": {
+            "theme.base": "light",
+            "theme.primaryColor": "#1D4ED8",
+            "theme.backgroundColor": "#F7F8FC",
+            "theme.secondaryBackgroundColor": "#FFFFFF",
+            "theme.textColor": "#0F172A",
+        },
+        "dark": {
+            "theme.base": "dark",
+            "theme.primaryColor": "#38BDF8",
+            "theme.backgroundColor": "#0B1120",
+            "theme.secondaryBackgroundColor": "#131A33",
+            "theme.textColor": "#E2E8F0",
+        },
+    }
+    if st.session_state.get("_requested_base") == want:
+        return
     try:
-        current = st.get_option("theme.base") or "light"
-        if current != want:
-            st._config.set_option("theme.base", want)  # noqa: SLF001
+        changes = []
+        current_base = st.get_option("theme.base") or "light"
+        if current_base != want:
+            changes.append(("theme.base", want))
+        pal = PALETTES[want]
+        for k, v in pal.items():
+            if k == "theme.base":
+                continue
+            cur = st.get_option(k)
+            if cur != v:
+                changes.append((k, v))
+        if changes or current_base != want:
+            st.session_state["_requested_base"] = want
+            for k, v in pal.items():
+                try:
+                    st._config.set_option(k, v)  # noqa: SLF001
+                except Exception:
+                    logger.warning("Failed setting %s", k)
             st.rerun()
     except Exception as exc:
         logger.warning("Native theme switch unavailable: %s", exc)
@@ -341,9 +411,12 @@ def _apply_native_theme(mode: str) -> None:
 
 # One-time OS detection for Auto mode: runs only on fresh loads without
 # uploads (sets ?os_theme= then reloads once; never loops).
+# NOTE: a <script> injected via st.markdown is NOT executed (Streamlit
+# inserts HTML via innerHTML), so we embed it in an iframe that runs JS.
+# ``st.iframe`` is the modern API; fall back to ``components.html`` on
+# older Streamlit versions.
 if st.session_state.theme_mode == "Auto" and "os_theme" not in st.query_params:
-    components.html(
-        """<script>
+    _os_detect_html = """<script>
 try {
   var dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   var url = new URL(window.top.location.href);
@@ -352,25 +425,21 @@ try {
     window.top.location.replace(url.toString());
   }
 } catch (e) {}
-</script>""",
-        height=0,
-    )
+</script>"""
+    if hasattr(st, "iframe"):
+        st.iframe(_os_detect_html, height=1)
+    else:  # pragma: no cover - older Streamlit
+        import streamlit.components.v1 as components
 
-_apply_native_theme(_resolve_theme_mode())
+        components.html(_os_detect_html, height=0)
 
-
-def _active_theme_type() -> str:
-    """The theme Streamlit is actually rendering ('light'/'dark')."""
-    try:
-        t = st.context.theme.get("type")
-        return t if t in ("light", "dark") else "light"
-    except Exception:
-        return "light"
+_ACTIVE_BASE = _resolved_base()
+_apply_native_theme(_ACTIVE_BASE)
 
 
 # Adapt ONLY our own brand classes to the active native theme.
 # (Native widgets/tables/charts/alerts already match — nothing to fix.)
-if _active_theme_type() == "dark":
+if _ACTIVE_BASE == "dark":
     st.markdown(
         """<style>
 .section-title { color: #F1F5F9; }

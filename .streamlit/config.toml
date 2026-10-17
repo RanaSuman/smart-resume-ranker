@@ -1,21 +1,6 @@
+[client]
+toolbarMode = "minimal"
+
 [theme]
-primaryColor = "#1D4ED8"
-backgroundColor = "#F7F8FC"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#0F172A"
+# No color overrides here; colors are set dynamically per mode.
 font = "sans serif"
-
-# Native dark brand — applied automatically when the dark base is active,
-# so every widget, table, chart and alert renders perfectly (no CSS hacks).
-[theme.dark]
-primaryColor = "#38BDF8"
-backgroundColor = "#0B1120"
-secondaryBackgroundColor = "#131A33"
-textColor = "#E2E8F0"
-
-[server]
-headless = true
-enableXsrfProtection = true
-
-[browser]
-gatherUsageStats = false
